@@ -8,6 +8,45 @@ from openpilot.selfdrive.modeld.constants import ModelConstants
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 
 LongCtrlState = car.CarControl.Actuators.LongControlState
+STOP_HOLD_RELEASE_FRAMES = 3  # 150 ms at the 20 Hz longitudinal planner rate
+
+
+class LongitudinalStopHold:
+  """Keep a physical e2e stop held until the model predicts a real launch."""
+
+  def __init__(self):
+    self.holding = False
+    self.release_frames = 0
+    self.released = False
+
+  def reset(self):
+    self.holding = False
+    self.release_frames = 0
+    self.released = False
+
+  def update(self, raw_should_stop: bool, standstill: bool, launch_intent: bool) -> bool:
+    if not standstill:
+      self.reset()
+      return raw_should_stop
+
+    if raw_should_stop:
+      self.holding = True
+      self.release_frames = 0
+      self.released = False
+      return True
+
+    if self.released:
+      return False
+
+    if not launch_intent:
+      self.holding = True
+      self.release_frames = 0
+      return True
+
+    self.release_frames += 1
+    self.holding = self.release_frames < STOP_HOLD_RELEASE_FRAMES
+    self.released = not self.holding
+    return self.holding
 
 
 def long_control_state_trans(CP, CP_SP, active, long_control_state, v_ego,

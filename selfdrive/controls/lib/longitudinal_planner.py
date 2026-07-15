@@ -8,7 +8,7 @@ from openpilot.common.constants import CV
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.modeld.constants import ModelConstants
-from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
+from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState, LongitudinalStopHold
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc, LongitudinalPlanSource
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan
@@ -67,6 +67,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.output_a_target = 0.0
     self.output_should_stop = False
     self.launch_armed = False
+    self.stop_hold = LongitudinalStopHold()
 
     self.v_desired_trajectory = np.zeros(CONTROL_N)
     self.a_desired_trajectory = np.zeros(CONTROL_N)
@@ -170,8 +171,10 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       self.launch_armed = True
     elif v_ego > LAUNCH_DISARM_SPEED:
       self.launch_armed = False
-    if (self.launch_armed and self.is_e2e(sm) and not output_should_stop_e2e and
-        np.interp(LAUNCH_COMMIT_T, T_IDXS_MPC, model_v) > LAUNCH_DISARM_SPEED):
+    e2e_mode = self.is_e2e(sm)
+    launch_intent = (self.launch_armed and e2e_mode and not output_should_stop_e2e and
+                     np.interp(LAUNCH_COMMIT_T, T_IDXS_MPC, model_v) > LAUNCH_DISARM_SPEED)
+    if launch_intent:
       t_cut = min(float(T_IDXS_MPC[np.argmax(model_v > LAUNCH_MOVING_SPEED)]), LAUNCH_COMMIT_T)
       t_shifted = T_IDXS_MPC + t_cut
       v_shifted = np.interp(t_shifted, T_IDXS_MPC, model_v)
@@ -180,14 +183,16 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       a_launch_max = np.interp(v_ego, [LAUNCH_MOVING_SPEED, LAUNCH_DISARM_SPEED], [LAUNCH_MAX_ACCEL, 0.])
       output_a_target_e2e = max(output_a_target_e2e, min(a_launch, a_launch_max))
 
-    if self.is_e2e(sm):
+    if e2e_mode:
       output_a_target = min(output_a_target_e2e, output_a_target_mpc)
-      self.output_should_stop = output_should_stop_e2e or output_should_stop_mpc
+      raw_should_stop = output_should_stop_e2e or output_should_stop_mpc
+      self.output_should_stop = self.stop_hold.update(raw_should_stop, sm['carState'].standstill, launch_intent)
       if output_a_target < output_a_target_mpc:
         self.mpc.source = LongitudinalPlanSource.e2e
     else:
       output_a_target = output_a_target_mpc
       self.output_should_stop = output_should_stop_mpc
+      self.stop_hold.reset()
 
     for idx in range(2):
       accel_clip[idx] = np.clip(accel_clip[idx], self.prev_accel_clip[idx] - 0.05, self.prev_accel_clip[idx] + 0.05)
